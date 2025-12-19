@@ -1,0 +1,220 @@
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <SoftwareSerial.h>
+
+// HC-06 Bluetooth: TX -> D10, RX -> D11
+SoftwareSerial BT(10, 11); 
+
+const int buzzer = 6;
+
+// Port B Bit definitions for ATmega328P
+#define LED_COLD_BIT    PB5   // Pin 13
+#define LED_MEDIUM_BIT  PB1   // Pin 9
+#define LED_HOT_BIT     PB4   // Pin 12
+
+// Temperature thresholds for LEDs
+const float coldThreshold  = 22.0;  // below this = COLD
+const float hotThreshold   = 28.0;  // above this = HOT
+
+
+#define NOTE_B3 247
+#define NOTE_C4 262
+#define NOTE_D4 294
+#define NOTE_E4 330     //Note confuguration
+#define NOTE_F44 370
+#define NOTE_G4 392
+#define NOTE_A4 440
+#define NOTE_B4 494
+
+// Global variables
+volatile float storedTemp = 0.0;
+volatile bool playAlarm = false; 
+volatile bool dataReady = false; 
+
+//Order to play notes
+int notes[] = {
+  NOTE_D4, NOTE_B3, NOTE_C4, NOTE_D4, 0,
+  NOTE_G4, NOTE_A4, NOTE_D4, NOTE_B4, 0,
+  NOTE_G4, NOTE_E4, NOTE_A4, NOTE_G4, NOTE_F44, NOTE_G4, 0,
+  NOTE_D4, NOTE_A4, NOTE_G4, NOTE_F44, NOTE_E4, NOTE_D4, NOTE_C4,
+  NOTE_B3, NOTE_E4, NOTE_D4, 0,
+  NOTE_D4, NOTE_A4, NOTE_G4, NOTE_F44, NOTE_E4, NOTE_D4, NOTE_C4,
+  NOTE_B3, NOTE_E4, NOTE_D4, 0,
+  NOTE_D4, NOTE_G4, NOTE_D4, NOTE_B3, NOTE_D4, NOTE_G4, NOTE_A4, NOTE_B4, 0,
+  NOTE_G4, NOTE_E4, NOTE_A4, NOTE_G4, NOTE_F44, NOTE_G4
+};
+
+// Note Durations
+int durations[] = {
+  500, 500, 500, 1250, 250,
+  500, 750, 250, 1750, 250,
+  1000, 750, 250, 1000, 1000, 1750, 500,
+  500, 750, 250, 500, 500, 500, 500,
+  500, 500, 1250, 250,
+  500, 750, 250, 500, 500, 500, 500,
+  500, 500, 1250, 250,
+  500, 750, 250, 500, 500, 500, 500, 1500, 500,
+  1000, 750, 250, 1000, 1000, 2000
+};
+
+// Manual buzzer function
+// This function forces the pin to toggle manually.
+void buzz(int targetPin, long frequency, long length) {
+  if (frequency == 0) return;
+  
+  long delayValue = 1000000 / frequency / 2; // Calculate half-period in microseconds
+  long numCycles = frequency * length / 1000; // Calculate how many cycles for duration
+
+  for (long i = 0; i < numCycles; i++) { 
+    digitalWrite(targetPin, HIGH); 
+    delayMicroseconds(delayValue); 
+    digitalWrite(targetPin, LOW); 
+    delayMicroseconds(delayValue); 
+  } 
+}
+
+//LDR reading
+int readLDR() {
+  ADMUX = (1 << REFS0) | (1 << MUX0); // Switch to A1
+  delay(2); 
+  
+  ADCSRA |= (1 << ADSC);            // Start conversion
+  while (ADCSRA & (1 << ADSC)); 
+  
+  int val = ADC;
+  ADMUX = (1 << REFS0);             // Switch back to A0
+  return val;
+}
+
+void setup_timer1(void){
+  cli();
+  
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1  = 0;
+  OCR1A = 15624;                         // 1 second interval
+  TCCR1B |= (1 << WGM12);                // CTC Mode
+  TCCR1B |= (1 << CS12) | (1 << CS10);  // 1024 prescaler
+  TIMSK1 |= (1 << OCIE1A);              // Enable interrupt
+
+  sei(); 
+}
+
+void setup() {
+  Serial.begin(9600); 
+  BT.begin(9600);     
+  
+//Setup for buzzer
+  pinMode(buzzer, OUTPUT);
+  
+//Setup for LED
+  DDRB |= (1 << LED_COLD_BIT) | (1 << LED_MEDIUM_BIT) | (1 << LED_HOT_BIT);
+
+//Start with all LEDs off
+  PORTB &= ~((1 << LED_COLD_BIT) | (1 << LED_MEDIUM_BIT) | (1 << LED_HOT_BIT));
+
+//LDR setup
+  DDRC &= ~(1 << DDC1); 
+  PORTC &= ~(1 << PORTC1);
+  DIDR0 |= (1 << ADC1D); 
+
+//TMP36 setup
+  ADMUX = (1 << REFS0); 
+  ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+
+  setup_timer1();
+  
+  //Configure sleep mode
+  set_sleep_mode(SLEEP_MODE_IDLE);
+
+  Serial.println(F("System Ready."));
+}
+
+void playMaamme() {
+  int totalNotes = sizeof(notes) / sizeof(int);
+  
+  for (int i = 0; i < totalNotes; i++) {        //Play the alarm
+    
+    int ldrValue = readLDR();                   // Check LDR for Override
+    
+    if (ldrValue > 512) {
+       BT.println("OVERRIDE: Alarm Stopped by Light.");
+       Serial.println("OVERRIDE: Alarm Stopped by Light.");
+       digitalWrite(buzzer, LOW);           // Ensure silence
+       playAlarm = false; 
+       return; 
+    }
+
+    int currentNote = notes[i];
+    int wait = durations[i];
+    
+    if (currentNote != 0) {
+      buzz(buzzer, currentNote, wait);
+    } else {
+      delay(wait);
+    }
+    
+    digitalWrite(buzzer, LOW);
+    delay(20);                            //Pause between notes for articulation
+  }
+}
+
+// Interrupt
+ISR(TIMER1_COMPA_vect) {
+
+  ADMUX &= ~(1 << MUX0);        // Ensure we are reading A0
+  
+  ADCSRA |= (1 << ADSC);
+  while (ADCSRA & (1 << ADSC));
+
+  uint16_t rawValue = ADC;
+  float voltage = rawValue * 0.004882814;         //Calculation for TMP36
+  float degreesC = (voltage - 0.5) * 100.0;
+  
+  storedTemp = degreesC;
+  dataReady = true;                               //Store the temperature
+
+  if (degreesC < 25.0) {
+    playAlarm = true;                   //Alarm plays is C < 25
+  } 
+}
+
+void loop() {
+  if (dataReady == true) {
+    
+    //LED logic
+    if (storedTemp < coldThreshold) {
+      PORTB |= (1 << LED_COLD_BIT);                             //Logic for cold
+      PORTB &= ~((1 << LED_MEDIUM_BIT) | (1 << LED_HOT_BIT));
+    } else if (storedTemp < hotThreshold) {
+      PORTB |= (1 << LED_MEDIUM_BIT);                          //Logic for medium
+      PORTB &= ~((1 << LED_COLD_BIT) | (1 << LED_HOT_BIT));
+    } else {
+      PORTB |= (1 << LED_HOT_BIT);                              //Logic for hot
+      PORTB &= ~((1 << LED_COLD_BIT) | (1 << LED_MEDIUM_BIT));
+    }
+
+    if (playAlarm) {
+      BT.print("ALARM! Temp: ");
+      Serial.print("ALARM! Temp: ");
+    } else {
+      BT.print("Normal Temp: ");
+      Serial.print("Normal Temp: ");
+    }
+    BT.print(storedTemp);
+    BT.println(" C"); 
+    Serial.println(storedTemp); 
+    
+    if (playAlarm) {
+      playMaamme();
+    }
+    
+    dataReady = false; 
+  }
+  // Sleep mode configuration. Arduino will be woken up:
+  // Timer1 (every 1 second), Runs ISR
+  // Timer0 (every 1ms), Wakes up, loops, sees dataReady=false, sleeps again
+  sleep_enable();
+  sleep_cpu();
+  sleep_disable();
+}

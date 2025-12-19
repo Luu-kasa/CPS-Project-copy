@@ -1,0 +1,64 @@
+#include "BluetoothSerial.h"
+#include "esp_log.h" 
+
+BluetoothSerial SerialBT;
+ 
+uint8_t address[6]  = {0x98, 0xDA, 0x60, 0x05, 0x5D, 0xDB};   //MAC address
+const char *pin = "1234";                                     //Pin code for MAC                          
+ 
+String serialBuffer = ""; 
+
+void setup() {
+  Serial.begin(115200);                     //Baudrate
+
+  Serial.setDebugOutput(false);
+  esp_log_level_set("*", ESP_LOG_ERROR);    // This command stops standard system debug prints.
+
+  SerialBT.begin("ESP32-MASTER", true);     //Start the bluetooth
+  SerialBT.setPin(pin, 4); 
+  
+  Serial.println("Bluetooth started. Connecting to HC-06...");
+
+  bool connected = SerialBT.connect(address);
+  
+  if(connected) {
+    Serial.println("Connected Successfully!");          //Print this when connected
+  } else {
+    while(!SerialBT.connected(10000)) {
+      Serial.println("Failed to connect. Retrying...");  //Retry if failed
+      SerialBT.connect(address);
+    }
+    Serial.println("Connected Successfully!");
+  }
+}
+
+void loop() {
+  while (SerialBT.available()) {
+  char c = SerialBT.read();
+ 
+    if (c == '\n') {
+      if (serialBuffer.length() > 0) {
+        //Check for the data
+        if (serialBuffer.indexOf("ASSERT") == -1 && serialBuffer.indexOf("lc_task") == -1) 
+        {
+           Serial.print("[FROM UNO]: ");            
+           Serial.println(serialBuffer); 
+}
+
+ serialBuffer = ""; 
+ }
+ } 
+    else if (c != '\r') {
+      serialBuffer += c;
+    }
+  }
+
+  if (!SerialBT.connected()) {
+    Serial.println("Link lost. Reconnecting...");
+    SerialBT.connect(address);                      //Try reconnecting
+    delay(500);
+  }
+
+  //Delay to let the Bluetooth Stack process background tasks
+  delay(10);
+}
